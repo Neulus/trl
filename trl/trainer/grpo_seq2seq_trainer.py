@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from json import encoder
 import os
 import textwrap
 from collections import defaultdict
@@ -26,7 +27,7 @@ from packaging import version
 from torch.utils.data import Sampler
 from transformers import (
     AutoModelForCausalLM,
-    AutoTokenizer,
+    AutoProcessor,
     GenerationConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -151,14 +152,14 @@ class GRPOSeq2SeqTrainer(Trainer):
             Dataset to use for evaluation. It must meet the same requirements as `train_dataset`.
         processing_class ([`~transformers.PreTrainedTokenizerBase`], *optional*, defaults to `None`):
             Processing class used to process the data. The padding side must be set to "left". If `None`, the
-            processing class is loaded from the model's name with [`~transformers.AutoTokenizer.from_pretrained`].
+            processing class is loaded from the model's name with [`~transformers.AutoProcessor.from_pretrained`].
         reward_processing_classes (`Union[PreTrainedTokenizerBase, list[PreTrainedTokenizerBase]]`, *optional*, defaults to `None`):
             Processing classes corresponding to the reward functions specified in `reward_funcs`. Can be either:
 
             - A single processing class: Used when `reward_funcs` contains only one reward function.
             - A list of processing classes: Must match the order and length of the reward functions in `reward_funcs`.
             If set to `None`, or if an element of the list corresponding to a [`~transformers.PreTrainedModel`] is
-            `None`, the tokenizer for the model is automatically loaded using [`~transformers.AutoTokenizer.from_pretrained`].
+            `None`, the tokenizer for the model is automatically loaded using [`~transformers.AutoProcessor.from_pretrained`].
             For elements in `reward_funcs` that are custom reward functions (not [`~transformers.PreTrainedModel`]),
             the corresponding entries in `reward_processing_classes` are ignored.
         callbacks (list of [`~transformers.TrainerCallback`], *optional*, defaults to `None`):
@@ -178,7 +179,7 @@ class GRPOSeq2SeqTrainer(Trainer):
         self,
         model: Union[str, PreTrainedModel],
         reward_funcs: Union[RewardFunc, list[RewardFunc]],
-        args: GRPOConfig,
+        args: GRPOConfig = None,
         train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
         eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
@@ -186,6 +187,11 @@ class GRPOSeq2SeqTrainer(Trainer):
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
     ):
+        if args is None:
+            model_name = model if isinstance(model, str) else model.config._name_or_path
+            model_name = model_name.split("/")[-1]
+            args = GRPOConfig(f"{model_name}-GRPO")
+
         # Models
         # Trained model
         model_init_kwargs = args.model_init_kwargs or {}
@@ -223,7 +229,7 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         # Processing class
         if processing_class is None:
-            processing_class = AutoTokenizer.from_pretrained(model.config._name_or_path, padding_side="left")
+            processing_class = AutoProcessor.from_pretrained(model.config._name_or_path, padding_side="left")
 
         # Reward functions
         if not isinstance(reward_funcs, list):
@@ -251,16 +257,6 @@ class GRPOSeq2SeqTrainer(Trainer):
             if len(reward_processing_classes) != len(reward_funcs):
                 raise ValueError("The number of reward processing classes must match the number of reward functions.")
 
-        for i, (reward_processing_class, reward_func) in enumerate(zip(reward_processing_classes, reward_funcs)):
-            if isinstance(reward_func, PreTrainedModel):
-                if reward_processing_class is None:
-                    reward_processing_class = AutoTokenizer.from_pretrained(reward_func.config._name_or_path)
-                if reward_processing_class.pad_token_id is None:
-                    reward_processing_class.pad_token = reward_processing_class.eos_token
-                # The reward model computes the reward for the latest non-padded token in the input sequence.
-                # So it's important to set the pad token ID to the padding token ID of the processing class.
-                reward_func.config.pad_token_id = reward_processing_class.pad_token_id
-                reward_processing_classes[i] = reward_processing_class
         self.reward_processing_classes = reward_processing_classes
 
         # Data collator
@@ -328,7 +324,7 @@ class GRPOSeq2SeqTrainer(Trainer):
             max_new_tokens=self.max_completion_length,
             do_sample=True,
             temperature=args.temperature,
-            pad_token_id=processing_class.pad_token_id,
+            # pad_token_id=processing_class.tokenizer.pad_token_id,
         )
 
         # Gradient accumulation requires scaled loss. Normally, loss scaling in the parent class depends on whether the
@@ -371,10 +367,10 @@ class GRPOSeq2SeqTrainer(Trainer):
         return RepeatRandomSampler(eval_dataset, self.num_generations, seed=self.args.seed)
 
     # Get the per-token log probabilities for the completions for the model and the reference model
-    def _get_per_token_logps(self, model, input_features, decoder_input_ids, attention_mask, logits_to_keep):
+    def _get_per_token_logps(self, model, input_features, encoder_attention_mask, decoder_input_ids, decoder_attention_mask, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
         logits = model(
-            input_features=input_features, decoder_input_ids=decoder_input_ids, decoder_attention_mask=attention_mask
+            input_features=input_features, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask
         ).logits
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
 
@@ -382,21 +378,28 @@ class GRPOSeq2SeqTrainer(Trainer):
         logits = logits[
             :, -logits_to_keep:
         ]  # Seq2Seq models return logits for all tokens, we only need the completions
+        print(decoder_input_ids.shape, logits.shape)
         return selective_log_softmax(logits, decoder_input_ids)  #  compute logprobs for the input tokens
 
     def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        audios = [x["audio"] for x in inputs]
-        audio_inputs = self.processing_class(audios, return_tensors="pt", return_attention_mask=True)
+        audios = [x["audio"]['array'] for x in inputs]
+        audio_inputs = self.processing_class.feature_extractor(
+            audios,
+            # truncation=False,
+            # padding="longest",
+            return_tensors="pt",
+            return_attention_mask=True,
+            sampling_rate=16000 # Hard coded for now
+        )
         audio_inputs = super()._prepare_inputs(audio_inputs)
 
         prompts = [x["prompt"] for x in inputs]
-        prompt_inputs = self.processing_class(
+        prompt_inputs = self.processing_class.tokenizer(
             prompts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
-
-        audio_ids, audio_mask = audio_inputs["input_ids"], audio_inputs["attention_mask"]
+        audio_features, audio_mask = audio_inputs["input_features"], audio_inputs["attention_mask"]
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
         if self.max_prompt_length is not None:
@@ -405,7 +408,7 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
             prompt_completion_ids = unwrapped_model.generate(
-                audio_ids, prompt_ids=prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config
+                input_features=audio_features, decoder_input_ids=prompt_ids, attention_mask=audio_mask
             )
 
         # Compute prompt length and extract completion ids
@@ -427,7 +430,7 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         with torch.inference_mode():
             ref_per_token_logps = self._get_per_token_logps(
-                self.ref_model, audio_inputs, prompt_ids, attention_mask, logits_to_keep
+                self.ref_model, audio_features, audio_mask, prompt_completion_ids, attention_mask, logits_to_keep
             )
 
         # Decode the generated completions
@@ -495,7 +498,7 @@ class GRPOSeq2SeqTrainer(Trainer):
                 wandb.log({"completions": wandb.Table(dataframe=df)})
 
         return {
-            "audio_ids": audio_ids,
+            "audio_features": audio_features,
             "audio_mask": audio_mask,
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
@@ -509,14 +512,14 @@ class GRPOSeq2SeqTrainer(Trainer):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
         # Compute the per-token log probabilities for the model
-        audio_ids, audio_mask = inputs["audio_ids"], inputs["audio_mask"]
+        audio_features, audio_mask = inputs["audio_features"], inputs["audio_mask"]
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
 
-        per_token_logps = self._get_per_token_logps(model, audio_ids, input_ids, attention_mask, logits_to_keep)
+        per_token_logps = self._get_per_token_logps(model, audio_features, audio_mask, input_ids, attention_mask, logits_to_keep)
 
         # Compute the KL divergence between the model and the reference model
         ref_per_token_logps = inputs["ref_per_token_logps"]
