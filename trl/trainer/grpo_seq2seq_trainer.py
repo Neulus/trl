@@ -33,6 +33,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     Trainer,
     TrainerCallback,
+    generation,
     is_wandb_available,
 )
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
@@ -403,7 +404,7 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
             prompt_completion_ids = unwrapped_model.generate(
-                input_features=audio_features, decoder_input_ids=prompt_ids, attention_mask=audio_mask
+                input_features=audio_features, decoder_input_ids=prompt_ids, attention_mask=audio_mask, generation_config=self.generation_config
             )
 
         # Compute prompt length and extract completion ids
