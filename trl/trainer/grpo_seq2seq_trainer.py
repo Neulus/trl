@@ -402,10 +402,6 @@ class GRPOSeq2SeqTrainer(Trainer):
         audio_features, audio_mask = audio_inputs["input_features"], audio_inputs["attention_mask"]
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-        if self.max_prompt_length is not None:
-            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
             prompt_completion_ids = unwrapped_model.generate(
                 input_features=audio_features, decoder_input_ids=prompt_ids, attention_mask=audio_mask
