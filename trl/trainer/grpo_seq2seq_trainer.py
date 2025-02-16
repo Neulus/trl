@@ -378,7 +378,6 @@ class GRPOSeq2SeqTrainer(Trainer):
         logits = logits[
             :, -logits_to_keep:
         ]  # Seq2Seq models return logits for all tokens, we only need the completions
-        print(decoder_input_ids.shape, logits.shape)
         return selective_log_softmax(logits, decoder_input_ids)  #  compute logprobs for the input tokens
 
     def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
