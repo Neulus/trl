@@ -394,7 +394,7 @@ class GRPOSeq2SeqTrainer(Trainer):
         )
         audio_inputs = super()._prepare_inputs(audio_inputs)
 
-        prompts = [x["prompt"] for x in inputs]
+        prompts = [x["prompt"] for x in inputs] # Repetition of same prompt
         prompt_inputs = self.processing_class.tokenizer(
             prompts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
@@ -403,14 +403,11 @@ class GRPOSeq2SeqTrainer(Trainer):
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
-            prompt_completion_ids = unwrapped_model.generate(
-                input_features=audio_features, decoder_input_ids=prompt_ids, attention_mask=audio_mask, generation_config=self.generation_config
+            completion_ids = unwrapped_model.generate(
+                input_features=audio_features, prompt_ids=prompt_ids[0], attention_mask=audio_mask, generation_config=self.generation_config
             )
 
-        # Compute prompt length and extract completion ids
-        prompt_length = prompt_ids.size(1)
-        prompt_ids = prompt_completion_ids[:, :prompt_length]
-        completion_ids = prompt_completion_ids[:, prompt_length:]
+        prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.tokenizer.eos_token_id  # WhisperProcesser only currently
@@ -433,7 +430,7 @@ class GRPOSeq2SeqTrainer(Trainer):
         completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
 
         rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
-        for i, (reward_func, reward_processing_class) in enumerate(
+        for i, (reward_func, _) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
             # Repeat all input columns (but "prompt" and "completion") to match the number of generations
@@ -506,7 +503,7 @@ class GRPOSeq2SeqTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
-            raise ValueError("The GRPOTrainer does not support returning outputs")
+            raise ValueError("The GRPOSeq2SeqTrainer does not support returning outputs")
         # Compute the per-token log probabilities for the model
         audio_features, audio_mask = inputs["audio_features"], inputs["audio_mask"]
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]

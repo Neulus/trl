@@ -18,20 +18,26 @@ import unittest
 
 import torch
 from datasets import load_dataset
-from parameterized import parameterized
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, WhisperForConditionalGeneration
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    WhisperForConditionalGeneration,
+)
 from transformers.testing_utils import require_peft, require_torch_accelerator
 
 from trl import GRPOConfig, GRPOTrainer, GRPOSeq2SeqTrainer
+
 
 class GRPOTrainerTester(unittest.TestCase):
     def test_training_reward_func_standard(self):
         # Test if trainer can handle reward function with standard format
         dataset = load_dataset("neulus/whisper-internal-test", split="train")
 
+        import random 
         def reward_func(completions, **kwargs):
-            """Reward function that rewards longer completions."""
-            return [float(len(completion)) for completion in completions]
+            """Random reward function that gives generally higher scores to longer completions."""
+            return [random.random() for completion in completions]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = GRPOConfig(
@@ -42,7 +48,9 @@ class GRPOTrainerTester(unittest.TestCase):
                 max_completion_length=32,  # reduce the completion length to reduce memory usage
                 report_to="none",
             )
-            model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny")
+            model = WhisperForConditionalGeneration.from_pretrained(
+                "openai/whisper-tiny"
+            )
             trainer = GRPOSeq2SeqTrainer(
                 model=model,
                 reward_funcs=reward_func,
@@ -50,7 +58,9 @@ class GRPOTrainerTester(unittest.TestCase):
                 train_dataset=dataset,
             )
 
-            previous_trainable_params = {n: param.clone() for n, param in trainer.model.named_parameters()}
+            previous_trainable_params = {
+                n: param.clone() for n, param in trainer.model.named_parameters()
+            }
 
             trainer.train()
 
@@ -59,8 +69,9 @@ class GRPOTrainerTester(unittest.TestCase):
             # Check the params have changed
             for n, param in previous_trainable_params.items():
                 new_param = trainer.model.get_parameter(n)
-                self.assertFalse(torch.equal(param, new_param), f"Parameter {n} has not changed.")
-
+                self.assertFalse(
+                    torch.equal(param, new_param), f"Parameter {n} has not changed."
+                )
     # def test_training_reward_func_conversational(self):
     #     # Test if trainer can handle reward function with conversational format
     #     dataset = load_dataset("trl-internal-testing/zen", "conversational_prompt_only", split="train")
