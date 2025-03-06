@@ -34,10 +34,9 @@ class GRPOTrainerTester(unittest.TestCase):
         # Test if trainer can handle reward function with standard format
         dataset = load_dataset("neulus/whisper-internal-test", split="train")
 
-        import random 
         def reward_func(completions, **kwargs):
             """Random reward function that gives generally higher scores to longer completions."""
-            return [random.random() for completion in completions]
+            return [len(completion) for completion in completions]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = GRPOConfig(
@@ -47,6 +46,7 @@ class GRPOTrainerTester(unittest.TestCase):
                 num_generations=3,  # reduce the number of generations to reduce memory usage
                 max_completion_length=32,  # reduce the completion length to reduce memory usage
                 report_to="none",
+                temperature=0.8,
             )
             model = WhisperForConditionalGeneration.from_pretrained(
                 "openai/whisper-tiny"

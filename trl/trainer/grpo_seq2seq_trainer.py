@@ -272,6 +272,8 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         self.beta = args.beta
 
+        self.temperature = args.temperature
+
         # The trainer estimates the number of FLOPs (floating-point operations) using the number of elements in the
         # input tensor associated with the key "input_ids". However, in GRPO, the sampled data does not include the
         # "input_ids" key. Instead, the available keys is "prompt". As a result, the trainer issues the warning:
@@ -324,7 +326,6 @@ class GRPOSeq2SeqTrainer(Trainer):
         self.generation_config = GenerationConfig(
             max_new_tokens=self.max_completion_length,
             do_sample=True,
-            temperature=args.temperature,
             # pad_token_id=processing_class.tokenizer.pad_token_id,
         )
 
@@ -404,7 +405,8 @@ class GRPOSeq2SeqTrainer(Trainer):
 
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
             completion_ids = unwrapped_model.generate(
-                input_features=audio_features, prompt_ids=prompt_ids[0], attention_mask=audio_mask, generation_config=self.generation_config
+                input_features=audio_features, prompt_ids=prompt_ids[0], attention_mask=audio_mask,
+                temperature=self.temperature, generation_config=self.generation_config
             )
 
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
